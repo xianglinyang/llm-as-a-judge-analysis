@@ -3,6 +3,15 @@ import re
 import numpy as np # Optional, if you want a NumPy array output
 from collections import Counter
 import logging
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch.nn.functional as F
+import math
+import argparse
+import json
+from tqdm import tqdm
+from typing import Tuple, List
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -416,18 +425,6 @@ def extract_syntactic_features_vector(text: str, include_dep_ratios=True) -> Tup
 
     return core_feature_vector, dep_ratio_vector, dep_ratio_names
 
-# import spacy
-# import re
-# import numpy as np
-# from collections import Counter
-
-# # Load the spaCy model (use a consistent model for all texts)
-# try:
-#     nlp = spacy.load("en_core_web_sm")
-# except OSError:
-#     print("Downloading spaCy model 'en_core_web_sm'...")
-#     spacy.cli.download("en_core_web_sm")
-#     nlp = spacy.load("en_core_web_sm")
 
 # Define lists for specific word categories (reuse from lexical if needed)
 TRANSITION_WORDS = {
@@ -567,10 +564,202 @@ def save_feature_vecs(feature_vecs, filename):
     np.save(filename+".npy", feature_vecs)
 
 
+def load_model_and_tokenizer(model_name: str, device: str):
+    if "cuda" in device:
+        assert torch.cuda.is_available(), "CUDA is not available"
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).to(device)
+        model.eval() # Set model to evaluation mode
+        print(f"Model '{model_name}' loaded on {device}.")
+    except Exception as e:
+        print(f"Error loading model or tokenizer: {e}")
+        # Handle error appropriately - perhaps skip these features
+        tokenizer = None
+        model = None
+    return tokenizer, model
+
+
+# Define feature names
+MODEL_PROBABILITY_FEATURE_NAMES = [
+    "perplexity",
+    "average_log_probability",
+    "distributional_confidence",
+    "self_certainty",
+    "per_token_entropy",
+    "per_token_dist_perplexity",
+    "per_token_gini_impurity",
+    "per_token_kl_divergence"
+]
+
+def calculate_model_probability_features(text: str, context: str = None, model_name_or_path: str = "meta-llama/Llama-3.1-8B-Instruct", device: str = "cuda") -> Tuple[float, float, float, float, float, List[float], List[float], List[float], List[float]]:
+    """
+    Calculate perplexity, average negative log likelihood, average log-probability,
+    distributional confidence, self-certainty, and per-token metrics (entropy,
+    distributional perplexity, Gini impurity, KL divergence) for a given prompt and answer.
+    Perplexity is computed only over the answer tokens, masking out the prompt.
+    
+    Args:
+        text: The target text (e.g., the answer).
+        context: Optional preceding text (e.g., the question). If provided,
+                 calculates P(text | context). If None, calculates P(text).
+        model_name_or_path: The name or path of the pre-loaded transformer model.
+        device: The device to run the model on.
+        
+    Returns:
+        Tuple[float, float, float, float, float, List[float], List[float], List[float], List[float]]:
+            (perplexity, avg_negative_log_likelihood, avg_log_probability,
+             distributional_confidence, self_certainty,
+             per_token_entropy, per_token_dist_perplexity, per_token_gini_impurity, per_token_kl_divergence)
+    """
+    tokenizer, model = load_model_and_tokenizer(model_name_or_path, device)
+    try:
+        # Set model to evaluation mode
+        model.eval()
+
+        question_messages = [
+            {"role": "user", "content": context},
+        ]
+        full_messages = [
+            {"role": "user", "content": context},
+            {"role": "assistant", "content": text}
+        ]
+        question_input_text = tokenizer.apply_chat_template(question_messages, tokenize=False)
+        full_text = tokenizer.apply_chat_template(full_messages, tokenize=False)
+        
+        # Tokenize inputs
+        encodings = tokenizer(
+            full_text,
+            return_tensors="pt",
+            max_length=2048,
+            truncation=True,
+            padding=True
+        )
+        
+        input_ids = encodings["input_ids"].to(model.device)
+        attention_mask = encodings["attention_mask"].to(model.device)
+        
+        # Get the prompt length to separate prompt and answer tokens
+        prompt_encodings = tokenizer(
+            question_input_text,
+            return_tensors="pt",
+            max_length=2048,
+            truncation=True,
+            padding=True
+        )
+        prompt_length = prompt_encodings["input_ids"].size(1)
+        
+        # Create labels tensor with prompt tokens masked out
+        labels = input_ids.clone()
+        # Set labels for prompt tokens to -100 to ignore them in loss computation
+        labels[:, :prompt_length] = -100
+        
+        with torch.no_grad():
+            # Get model outputs
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels
+            )
+            
+            # Extract logits
+            logits = outputs.logits
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = input_ids[..., 1:].contiguous()
+            
+            # Compute per-token negative log likelihood
+            loss_fct = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
+            loss = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1)
+            )
+            
+            # Reshape loss to match sequence length
+            loss = loss.view(shift_labels.size())
+            
+            # Extract loss for the answer part only (already handled by ignore_index=-100)
+            answer_loss = loss[:, prompt_length-1:].mean() if prompt_length < loss.size(1) else loss.mean()
+            
+            # Calculate perplexity over the answer tokens only
+            perplexity = torch.exp(answer_loss) if not torch.isnan(answer_loss) else float('inf')
+            
+            # Calculate log-probabilities for each token
+            log_probs = F.log_softmax(shift_logits, dim=-1)
+            token_log_probs = log_probs.gather(dim=-1, index=shift_labels.unsqueeze(-1)).squeeze(-1)
+            
+            # Calculate average log-probability for the answer part
+            answer_log_probs = token_log_probs[:, prompt_length-1:] if prompt_length < token_log_probs.size(1) else token_log_probs
+            avg_log_prob = answer_log_probs.mean()
+            
+            # Calculate probabilities for additional metrics
+            probs = F.softmax(shift_logits, dim=-1)
+            
+            # Distributional Confidence: Average of max probabilities for the answer part
+            max_probs = probs.max(dim=-1).values
+            answer_max_probs = max_probs[:, prompt_length-1:] if prompt_length < max_probs.size(1) else max_probs
+            distributional_confidence = answer_max_probs.mean()
+            
+            # Self-Certainty: Variance of max probabilities (lower variance -> higher self-certainty)
+            if answer_max_probs.numel() > 1:  # Need at least 2 values to compute variance
+                self_certainty = 1.0 / (answer_max_probs.var() + 1e-10)  # Inverse variance as a proxy
+            else:
+                self_certainty = 1.0  # Default to high certainty if only one token
+            
+            # Compute per-token metrics for the answer part
+            probs_eps = probs + 1e-10  # Add epsilon to avoid log(0)
+            
+            # Per-token Entropy: -sum(p_i * log(p_i))
+            entropy = -(probs_eps * probs_eps.log()).sum(dim=-1)
+            answer_entropy = entropy[:, prompt_length-1:] if prompt_length < entropy.size(1) else entropy
+            per_token_entropy = answer_entropy.squeeze(0).tolist()
+            
+            # Per-token Distributional Perplexity: exp(entropy)
+            dist_perplexity = torch.exp(answer_entropy)
+            per_token_dist_perplexity = dist_perplexity.squeeze(0).tolist()
+            
+            # Per-token Gini Impurity: 1 - sum(p_i^2)
+            squared_probs = probs ** 2
+            gini_impurity = 1.0 - squared_probs.sum(dim=-1)
+            answer_gini = gini_impurity[:, prompt_length-1:] if prompt_length < gini_impurity.size(1) else gini_impurity
+            per_token_gini_impurity = answer_gini.squeeze(0).tolist()
+            
+            # Per-token KL Divergence w.r.t. uniform distribution
+            vocab_size = shift_logits.size(-1)
+            uniform_dist = torch.full_like(probs, 1.0 / vocab_size)
+            uniform_eps = uniform_dist + 1e-10
+            kl_div = (probs_eps * (probs_eps.log() - uniform_eps.log())).sum(dim=-1)
+            answer_kl_div = kl_div[:, prompt_length-1:] if prompt_length < kl_div.size(1) else kl_div
+            per_token_kl_divergence = answer_kl_div.squeeze(0).tolist()
+            
+            return (
+                perplexity.item(),
+                answer_loss.item(),
+                avg_log_prob.item(),
+                distributional_confidence.item(),
+                self_certainty.item(),
+                per_token_entropy,
+                per_token_dist_perplexity,
+                per_token_gini_impurity,
+                per_token_kl_divergence
+            )
+    except Exception as e:
+        print(f"Error calculating metrics: {str(e)}")
+        return float('inf'), float('inf'), float('-inf'), 0.0, 0.0, [], [], [], []
+
+
+def calculate_metrics_batch(inputs, outputs, model_name_or_path: str = "meta-llama/Llama-3.1-8B-Instruct", device: str = "cuda"):
+    tokenizer, model = load_model_and_tokenizer(model_name_or_path, device)
+
+    results = list()
+    for i, o in zip(inputs, outputs):
+        single_features = calculate_model_probability_features(i, o, model, tokenizer, max_length=max_length)
+        results.append(single_features)
+    return results
+
+
 if __name__ == "__main__":
-    import argparse
-    import json
-    from tqdm import tqdm
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_file", type=str, required=True)
     parser.add_argument("--output_file", type=str, required=True)
@@ -589,123 +778,3 @@ if __name__ == "__main__":
         feature_vecs.append(feature_vec)
     
     save_feature_vecs(feature_vecs, output_path)
-
-
-# import torch
-# from transformers import AutoModelForCausalLM, AutoTokenizer
-# import numpy as np
-# import math
-
-# # --- Configuration ---
-# MODEL_NAME = "gpt2" # Choose a model (e.g., "gpt2", "gpt2-medium", "distilgpt2", or others)
-# DEVICE = "cuda" if torch.cuda.is_available() else "cpu" # Use GPU if available
-
-# # --- Load Model and Tokenizer (Load only once if processing many texts) ---
-# try:
-#     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-#     model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(DEVICE)
-#     model.eval() # Set model to evaluation mode
-#     print(f"Model '{MODEL_NAME}' loaded on {DEVICE}.")
-# except Exception as e:
-#     print(f"Error loading model or tokenizer: {e}")
-#     # Handle error appropriately - perhaps skip these features
-#     tokenizer = None
-#     model = None
-
-# # Define feature names
-# MODEL_PROBABILITY_FEATURE_NAMES = [
-#     "perplexity",
-#     "average_log_probability"
-# ]
-
-# def calculate_model_probability_features(text: str, context: str = None) -> list:
-#     """
-#     Calculates perplexity and average log probability of a text using a pre-loaded transformer model.
-#     Optionally calculates conditional probability given context (like a question).
-
-#     Args:
-#         text: The target text (e.g., the answer).
-#         context: Optional preceding text (e.g., the question). If provided,
-#                  calculates P(text | context). If None, calculates P(text).
-
-#     Returns:
-#         A list containing [perplexity, average_log_probability], or [NaN, NaN] if calculation fails.
-#     """
-#     if not model or not tokenizer or not text or not text.strip():
-#         return [np.nan, np.nan] # Return NaN if model isn't loaded or text is empty
-
-#     # Combine context and text if context is provided
-#     if context and context.strip():
-#         full_text = context.strip() + " " + text.strip() # Simple concatenation
-#         context_tokens = tokenizer(context.strip(), return_tensors='pt').input_ids.to(DEVICE)
-#         context_length = context_tokens.shape[1]
-#     else:
-#         full_text = text.strip()
-#         context_length = 0 # No context to ignore in loss calculation
-
-#     try:
-#         inputs = tokenizer(full_text, return_tensors='pt').to(DEVICE)
-#         input_ids = inputs.input_ids
-#         target_ids = input_ids.clone()
-
-#         # For causal LMs, loss is calculated based on shifting inputs/outputs
-#         # We only care about the loss for the 'text' part if context was given
-#         # The loss calculation needs labels. Usually labels are input_ids shifted.
-#         # Hugging Face CausalLM models do this internally when labels aren't provided separately.
-#         # However, to ignore context loss, we manually set labels for context tokens to -100.
-#         if context_length > 0 and input_ids.shape[1] > context_length:
-#              # Set labels for context tokens to -100 (ignored by loss function)
-#              target_ids[:, :context_length] = -100
-
-#         with torch.no_grad():
-#             outputs = model(input_ids, labels=target_ids)
-#             neg_log_likelihood = outputs.loss # This is the average negative log likelihood
-
-#         # Perplexity is exp(average negative log likelihood)
-#         perplexity = torch.exp(neg_log_likelihood).item()
-
-#         # Average log probability is the negative of the average NLL
-#         # Note: neg_log_likelihood is already averaged over the sequence length
-#         # (specifically, the non-ignored label tokens)
-#         average_log_prob = -neg_log_likelihood.item()
-
-#         # Handle potential inf/nan results
-#         if math.isinf(perplexity) or math.isnan(perplexity): perplexity = np.nan
-#         if math.isinf(average_log_prob) or math.isnan(average_log_prob): average_log_prob = np.nan
-
-#         return [perplexity, average_log_prob]
-
-#     except Exception as e:
-#         print(f"Error during probability calculation for text: '{text[:50]}...': {e}")
-#         return [np.nan, np.nan]
-
-
-# # --- Example Usage ---
-
-# question = "What is the capital of France?"
-# answer = "The capital of France is Paris."
-
-# # Calculate probability of the answer itself
-# prob_features_answer_only = calculate_model_probability_features(answer)
-# print(f"\nFeatures for Answer Only ('{answer}'):")
-# print("Feature Names:", MODEL_PROBABILITY_FEATURE_NAMES)
-# print("Feature Vector:", [f"{x:.3f}" if not np.isnan(x) else "NaN" for x in prob_features_answer_only])
-
-# # Calculate probability of the answer GIVEN the question
-# prob_features_conditional = calculate_model_probability_features(answer, context=question)
-# print(f"\nFeatures for Answer GIVEN Question:")
-# print("Feature Names:", MODEL_PROBABILITY_FEATURE_NAMES)
-# print("Feature Vector:", [f"{x:.3f}" if not np.isnan(x) else "NaN" for x in prob_features_conditional])
-
-# # Example with potentially lower probability text
-# bad_answer = "France capital banana is."
-# prob_features_bad_answer = calculate_model_probability_features(bad_answer, context=question)
-# print(f"\nFeatures for Bad Answer ('{bad_answer}') GIVEN Question:")
-# print("Feature Names:", MODEL_PROBABILITY_FEATURE_NAMES)
-# print("Feature Vector:", [f"{x:.3f}" if not np.isnan(x) else "NaN" for x in prob_features_bad_answer])
-
-# # Example with empty text
-# empty_vec = calculate_model_probability_features("")
-# print("\nFeatures for empty text:", empty_vec)
-
-
