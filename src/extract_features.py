@@ -147,17 +147,6 @@ def extract_lexical_features_vector(text: str, include_pos_ratios=True) -> list:
     """
     feature_names = list(LEXICAL_FEATURE_NAMES) # Make a copy
 
-    if not text or not text.strip():
-        # Determine final feature names list length first if including POS
-        if include_pos_ratios:
-            # Need a way to know all possible POS tags or add them dynamically
-            # For simplicity, let's assume a standard set for zero vector
-            standard_pos = ['ADJ', 'ADP', 'ADV', 'AUX', 'CCONJ', 'DET', 'INTJ', 'NOUN', 'NUM', 'PART', 'PRON', 'PROPN', 'PUNCT', 'SCONJ', 'SYM', 'VERB', 'X', 'SPACE']
-            for pos in standard_pos:
-                feature_names.append(f'pos_{pos}_ratio')
-        return [0.0] * len(feature_names)
-        # return None
-
     doc = nlp(text)
     tokens = [token for token in doc if not token.is_space and not token.is_punct] # Exclude space/punct for lexical counts
     token_count = float(len(tokens))
@@ -206,8 +195,8 @@ def extract_lexical_features_vector(text: str, include_pos_ratios=True) -> list:
         current_pos_tags = sorted(pos_counts.keys())
         # Append names dynamically if this is the first call or use a predefined list
         if not any(name.startswith('pos_') for name in feature_names):
-             for pos in current_pos_tags:
-                 feature_names.append(f'pos_{pos}_ratio')
+            for pos in current_pos_tags:
+                feature_names.append(f'pos_{pos}_ratio')
 
         # Append values corresponding to the full feature_names list
         pos_vector_part = []
@@ -218,23 +207,6 @@ def extract_lexical_features_vector(text: str, include_pos_ratios=True) -> list:
 
         feature_vector.extend(pos_vector_part)
 
-
-    # Ensure vector length matches feature_names length, handling cases where some POS tags might be missing
-    # This part is tricky if feature_names isn't fixed beforehand. Best practice is a fixed list.
-    # Let's refine the empty vector return and POS addition assuming a fixed feature list is better.
-
-    # --- Refined Approach (Assuming fixed feature list needed) ---
-    # It's generally better to pre-define ALL possible feature names you want
-    # For dynamic POS tags, you might need a different structure like a dictionary
-    # or post-process vectors to align columns.
-    # Sticking to the initial LEXICAL_FEATURE_NAMES for simplicity here unless include_pos_ratios is handled carefully outside.
-
-
-    # --- Simpler return based on initial LEXICAL_FEATURE_NAMES ---
-    # If include_pos_ratios is True, the caller needs to handle the variable length
-    # or better, combine this function's output with a separate POS function output.
-    # Let's return only the core lexical features for simplicity here.
-    # Call a separate function for POS features if needed.
 
     final_feature_vector = [
         ttr,
@@ -554,6 +526,9 @@ def extract_feature_vector(text):
     discourse_vec = extract_discourse_structural_features_vector(text)
     vec = surface_formatting_feature_vec + lexical_vec + pos_vec + core_vec + dep_vec + discourse_vec
     return vec
+
+def feature_names():
+    return SURFACE_FEATURE_NAMES + LEXICAL_FEATURE_NAMES + STANDARD_POS_FEATURE_NAMES + CORE_SYNTACTIC_FEATURE_NAMES + COMMON_DEP_RELATIONS + DISCOURSE_FEATURE_NAMES
 
 
 def save_feature_vecs(feature_vecs, filename):
