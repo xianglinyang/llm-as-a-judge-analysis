@@ -25,12 +25,12 @@ TEXT_COLUMN = "text"                # Name for the text column in the DataFrame
 LABEL_COLUMN = "label"             # Name for the label column in the DataFrame
 
 # --- BoW/TF-IDF and Classifier Configuration ---
-TEST_SIZE = 0.1                 # Proportion of data for testing
+TEST_SIZE = 0.2                 # Proportion of data for testing
 USE_TFIDF = True                # Set to False to use simple Bag-of-Words counts
 MAX_FEATURES = 20000            # Optional: Limit vocabulary size (adjust based on memory/performance)
 STOP_WORDS = 'english'          # Use built-in English stop words ('None' to disable)
 NGRAM_RANGE = (1, 2)            # Use unigrams and bigrams (often better than just unigrams)
-CLASSIFIER_TYPE = 'SVM' # Options: 'NaiveBayes', 'LogisticRegression', 'SVM'
+CLASSIFIER_TYPE = 'LogisticRegression' # Options: 'NaiveBayes', 'LogisticRegression', 'SVM'
 SEED = 42                       # For reproducible train/test split
 MODEL_SAVE_PATH = f"{DATA_DIR}/bow_classifier_{CLASSIFIER_TYPE}.joblib"
 VECTORIZER_SAVE_PATH = f"{DATA_DIR}/bow_vectorizer_{'tfidf' if USE_TFIDF else 'count'}_ngram{NGRAM_RANGE[1]}_maxf{MAX_FEATURES}.joblib"
@@ -126,6 +126,9 @@ print(f"\nTraining Classifier: {CLASSIFIER_TYPE}...")
 
 classifier_params = {
     'random_state': SEED,
+    'penalty': 'l1',    # l1 for sparsity
+    'C': 1.0,  # regularization strength
+    'fit_intercept': False,
      # Add other common parameters if needed across classifiers
 }
 
