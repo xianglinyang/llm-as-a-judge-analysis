@@ -234,7 +234,23 @@ class GPT(APIJudgeModelWrapper):
             temperature=temperature,
         )
         return response.choices[0].message.content.strip()
-    
+
+
+class DashScope(APIJudgeModelWrapper):
+    def __init__(self, model_id: str, model_name: str):
+        super().__init__(model_id, model_name)
+        self.client = OpenAI(api_key=os.environ["DASHSCOPE_API_KEY"], base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
+
+    def _response(self, prompt: str, max_new_tokens=2048, temperature=0.7) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_new_tokens,
+            n=1,
+            temperature=temperature,
+        )
+        return response.choices[0].message.content.strip()
+
 
 class GeminiModel(APIJudgeModelWrapper):
     """Wrapper for Google Gemini models."""
