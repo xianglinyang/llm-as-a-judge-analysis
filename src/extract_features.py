@@ -724,14 +724,14 @@ def calculate_model_probability_features(text: str, context: str = None, model_n
         return float('inf'), float('inf'), float('-inf'), 0.0, 0.0, [], [], [], []
 
 
-def calculate_metrics_batch(inputs, outputs, model_name_or_path: str = "meta-llama/Llama-3.1-8B-Instruct", device: str = "cuda"):
-    tokenizer, model = load_model_and_tokenizer(model_name_or_path, device)
+# def calculate_metrics_batch(inputs, outputs, model_name_or_path: str = "meta-llama/Llama-3.1-8B-Instruct", device: str = "cuda"):
+#     tokenizer, model = load_model_and_tokenizer(model_name_or_path, device)
 
-    results = list()
-    for i, o in zip(inputs, outputs):
-        single_features = calculate_model_probability_features(i, o, model, tokenizer, max_length=max_length)
-        results.append(single_features)
-    return results
+#     results = list()
+#     for i, o in zip(inputs, outputs):
+#         single_features = calculate_model_probability_features(i, o, model, tokenizer, max_length=max_length)
+#         results.append(single_features)
+#     return results
 
 
 if __name__ == "__main__":
@@ -746,10 +746,13 @@ if __name__ == "__main__":
     with open(data_path, "r") as f:
         data = json.load(f)
 
-    feature_vecs = list()
     for item in tqdm(data):
         text = item['output']
-        feature_vec = extract_feature_vector(text)
-        feature_vecs.append(feature_vec)
+        if text is None:
+            item['feature_vec'] = None
+        else:
+            feature_vec = extract_feature_vector(text)
+            item['feature_vec'] = feature_vec
     
-    save_feature_vecs(feature_vecs, output_path)
+    with open(output_path, "w") as f:
+        json.dump(data, f)
