@@ -30,10 +30,26 @@ DATA_FILES = [
     f"{DATA_DIR}/UltraFeedback_sampled_30000_gpt4_LlamaFactory.json",
     f"{DATA_DIR}/UltraFeedback_sampled_30000_llama_LlamaFactory.json"
 ]
+QUESTION_TYPE_DATA_FILE = '/home/xianglin/git_space/llm-as-a-judge-analysis/analysis/dataset_categorization/ultrafeedback_categorization.json'
+
+QUESTION_TYPE_NOUNS = [
+    "Computer Science & Programming",
+    "Mathematics & Statistics",
+    "Science & Engineering",
+    "Business & Finance",
+    "Writing & Communication",
+    "Social & Daily Life",
+    "Others"
+]
+
+# Make sure the order of files corresponds to labels 0, 1, 2...
+EXPECTED_JSON_OUTPUT_KEY = "output" # Key in JSON containing the text
+SEED = 42 # For reproducibility
+
 TEXT_COLUMN = "text"             # Name of the column containing the text
 LABEL_COLUMN = "label"            # Name of the column containing the integer labels
 NUM_LABELS = 3                    # !! IMPORTANT: Set this to the number of distinct models !!
-TEST_SIZE = 0.1                   # Proportion of data to use for validation/testing
+TEST_SIZE = 0.2                   # Proportion of data to use for validation/testing
 OUTPUT_DIR = f"{DATA_DIR}/bert_classifier_results" # Directory to save model and results
 TRAIN_BATCH_SIZE = 16
 EVAL_BATCH_SIZE = 32
@@ -41,31 +57,94 @@ NUM_EPOCHS = 3
 LEARNING_RATE = 2e-5
 WEIGHT_DECAY = 0.01
 
-# --- 1. Load and Prepare Data ---
-dataset_dict = {
-    TEXT_COLUMN: list(),
-    LABEL_COLUMN: list()
-}
-for i, data_file in enumerate(DATA_FILES):
-    with open(data_file, "r") as f:
-        data = json.load(f)
-    for item in data:
-        if item["output"] is None:
-            continue
-        dataset_dict[TEXT_COLUMN].append(item["output"])
-        dataset_dict[LABEL_COLUMN].append(i)
+# --- 1. Load Data ---
+print("Loading data...")
+data_list = [] # Use a list of dictionaries to build DataFrame
 
-# shuffle the data
-dataset = Dataset.from_dict(dataset_dict)
-# --- Split Data ---
-# If you only have one split, create train/test splits
-# Do I need to shuffle the data?
-train_test_split_data = dataset.train_test_split(test_size=TEST_SIZE, shuffle=True)
+with open(QUESTION_TYPE_DATA_FILE, "r", encoding="utf-8") as f:
+    question_type_data = json.load(f)
+# process question type data
+question_type_mapping = {}
+for item in question_type_data:
+    if 'question' in item.keys() and 'categorization' in item.keys() and 'question category' in item['categorization'].keys():
+        question_type_mapping[item['question']] = item['categorization']['question category']
+
+
+
+for i, data_file in enumerate(DATA_FILES):
+    label = i # Assign label based on file index (0, 1, 2...)
+    print(f"Loading file: {data_file} with label {label}")
+    try:
+        with open(data_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        # merge
+        count = 0
+        for i in range(len(data)):
+            instruction = data[i]['instruction']
+            qt = question_type_mapping.get(instruction, None)
+            data[i]['question_type'] = qt
+            if qt is not None:
+                count += 1
+        print(f"Total {count} question types found for {data_file}")
+
+        count = 0
+        for item in data:
+            # Check if the expected key exists and its value is not None/empty string
+            if isinstance(item, dict) and EXPECTED_JSON_OUTPUT_KEY in item and item[EXPECTED_JSON_OUTPUT_KEY]:
+                 text_output = item[EXPECTED_JSON_OUTPUT_KEY]
+                 if isinstance(text_output, str) and text_output.strip() and item['question_type'] is not None:
+                    data_list.append({TEXT_COLUMN: text_output, LABEL_COLUMN: label, 'question_type': item['question_type']})
+                    count += 1
+        print(f"  Loaded {count} valid items.")
+    except FileNotFoundError:
+        print(f"  Error: File not found - {data_file}")
+    except json.JSONDecodeError:
+        print(f"  Error: Could not decode JSON from - {data_file}")
+    except Exception as e:
+        print(f"  An unexpected error occurred loading {data_file}: {e}")
+
+# Convert the list of dictionaries into a Pandas DataFrame
+if not data_list:
+    raise ValueError("No valid data loaded. Please check DATA_FILES paths and JSON structure.")
+
+df = pd.DataFrame(data_list)
+print(f"\nTotal valid items loaded into DataFrame: {len(df)}")
+print("DataFrame Info:")
+df.info()
+print("\nLabel distribution:")
+print(df[LABEL_COLUMN].value_counts())
+
+# Optional: Shuffle the DataFrame rows (good practice before splitting)
+df = df.sample(frac=1, random_state=SEED).reset_index(drop=True)
+
+# --- 2. Split Data ---
+X = df[TEXT_COLUMN]
+y = df[LABEL_COLUMN]
+question_types = df['question_type']
+
+X_train, X_test, y_train, y_test, question_type_train, question_type_test = train_test_split(
+    X, y, question_types,
+    test_size=TEST_SIZE,
+    random_state=SEED, # for reproducibility
+    stratify=y      # ensure similar label distribution in train/test
+)
+print(f"\nData split: Train={len(X_train)}, Test={len(X_test)}")
+
+# Create proper DataFrames for train and test sets
+train_df = pd.DataFrame({
+    TEXT_COLUMN: X_train,
+    LABEL_COLUMN: y_train,
+})
+
+test_df = pd.DataFrame({
+    TEXT_COLUMN: X_test,
+    LABEL_COLUMN: y_test,
+})
 
 dataset_dict = DatasetDict({
-    'train': train_test_split_data['train'],
-    'validation': train_test_split_data['test'] # Use test split as validation for Trainer
-    # 'test': test_valid_split_data['test'] # Keep a final test set separate if desired
+    'train': Dataset.from_pandas(train_df),
+    'test': Dataset.from_pandas(test_df)
 })
 
 print("Dataset Splits:")
@@ -137,7 +216,7 @@ trainer = Trainer(
     model=model,
     args=training_args,
     train_dataset=tokenized_datasets["train"],
-    eval_dataset=tokenized_datasets["validation"],
+    eval_dataset=tokenized_datasets["test"],
     tokenizer=tokenizer,
     data_collator=data_collator,
     compute_metrics=compute_metrics,
@@ -153,6 +232,8 @@ eval_results = trainer.evaluate()
 print("\nEvaluation Results:")
 print(eval_results)
 
+eval_per_question_type_dict = {}
+
 # --- 8. Save Final Model & Tokenizer ---
 print("\nSaving best model...")
 trainer.save_model(f"{OUTPUT_DIR}/best_model")
@@ -160,6 +241,38 @@ tokenizer.save_pretrained(f"{OUTPUT_DIR}/best_model")
 
 print("\nTraining and evaluation complete.")
 print(f"Model saved to: {OUTPUT_DIR}/best_model")
+
+# --- 9 Evaluation on each question type ---
+for question_type in QUESTION_TYPE_NOUNS:
+    print(f"\nEvaluating on {question_type}...")
+    select_x = X_test[question_type_test == question_type]
+    select_y = y_test[question_type_test == question_type]
+    
+    q_df = pd.DataFrame({
+        TEXT_COLUMN: select_x,
+        LABEL_COLUMN: select_y
+    })
+
+    # Create dataset from pandas and tokenize it properly
+    q_dataset = Dataset.from_pandas(q_df.copy())
+    # Tokenize this dataset in the same way as the main datasets
+    q_tokenized = q_dataset.map(tokenize_function, batched=True)
+    # Remove original text column and set format to pytorch
+    q_tokenized = q_tokenized.remove_columns([TEXT_COLUMN])
+    q_tokenized.set_format("torch")
+    
+    eval_per_question_type_dict[question_type] = q_tokenized
+
+for question_type in QUESTION_TYPE_NOUNS:
+    print(f"\nEvaluating on {question_type}...")
+    # Check if we have any data for this question type
+    if len(eval_per_question_type_dict[question_type]) == 0:
+        print(f"No data available for {question_type}")
+        continue
+
+    eval_results_per_q = trainer.evaluate(eval_per_question_type_dict[question_type])
+    print(eval_results_per_q)
+
 
 # # --- Optional: Prediction on a new text ---
 # from transformers import pipeline
