@@ -19,6 +19,17 @@ DATA_FILES = [
     f"{DATA_DIR}/UltraFeedback_sampled_30000_gpt4_LlamaFactory.json",
     f"{DATA_DIR}/UltraFeedback_sampled_30000_llama_LlamaFactory.json"
 ]
+QUESTION_TYPE_DATA_FILE = '/home/xianglin/git_space/llm-as-a-judge-analysis/analysis/dataset_categorization/ultrafeedback_categorization.json'
+
+QUESTION_TYPE_NOUNS = [
+    "Computer Science & Programming",
+    "Mathematics & Statistics",
+    "Science & Engineering",
+    "Business & Finance",
+    "Writing & Communication",
+    "Social & Daily Life",
+    "Others"
+]
 # Make sure the order of files corresponds to labels 0, 1, 2...
 EXPECTED_JSON_OUTPUT_KEY = "output" # Key in JSON containing the text
 TEXT_COLUMN = "text"                # Name for the text column in the DataFrame
@@ -45,19 +56,40 @@ os.makedirs(os.path.dirname(VECTORIZER_SAVE_PATH), exist_ok=True)
 print("Loading data...")
 data_list = [] # Use a list of dictionaries to build DataFrame
 
+with open(QUESTION_TYPE_DATA_FILE, "r", encoding="utf-8") as f:
+    question_type_data = json.load(f)
+# process question type data
+question_type_mapping = {}
+for item in question_type_data:
+    if 'question' in item.keys() and 'categorization' in item.keys() and 'question category' in item['categorization'].keys():
+        question_type_mapping[item['question']] = item['categorization']['question category']
+
+
+
 for i, data_file in enumerate(DATA_FILES):
     label = i # Assign label based on file index (0, 1, 2...)
     print(f"Loading file: {data_file} with label {label}")
     try:
         with open(data_file, "r", encoding="utf-8") as f:
             data = json.load(f)
+        
+        # merge
+        count = 0
+        for i in range(len(data)):
+            instruction = data[i]['instruction']
+            qt = question_type_mapping.get(instruction, None)
+            data[i]['question_type'] = qt
+            if qt is not None:
+                count += 1
+        print(f"Total {count} question types found for {data_file}")
+
         count = 0
         for item in data:
             # Check if the expected key exists and its value is not None/empty string
             if isinstance(item, dict) and EXPECTED_JSON_OUTPUT_KEY in item and item[EXPECTED_JSON_OUTPUT_KEY]:
                  text_output = item[EXPECTED_JSON_OUTPUT_KEY]
-                 if isinstance(text_output, str) and text_output.strip():
-                    data_list.append({TEXT_COLUMN: text_output, LABEL_COLUMN: label})
+                 if isinstance(text_output, str) and text_output.strip() and item['question_type'] is not None:
+                    data_list.append({TEXT_COLUMN: text_output, LABEL_COLUMN: label, 'question_type': item['question_type']})
                     count += 1
         print(f"  Loaded {count} valid items.")
     except FileNotFoundError:
@@ -84,9 +116,10 @@ df = df.sample(frac=1, random_state=SEED).reset_index(drop=True)
 # --- 2. Split Data ---
 X = df[TEXT_COLUMN]
 y = df[LABEL_COLUMN]
+question_types = df['question_type']
 
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y,
+X_train, X_test, y_train, y_test, question_type_train, question_type_test = train_test_split(
+    X, y, question_types,
     test_size=TEST_SIZE,
     random_state=SEED, # for reproducibility
     stratify=y      # ensure similar label distribution in train/test
@@ -153,6 +186,7 @@ print("\nEvaluating classifier on test data...")
 y_pred = classifier.predict(X_test_vec)
 
 accuracy = accuracy_score(y_test, y_pred)
+
 # Get class labels for report (assuming labels are 0, 1, 2...)
 target_names = [f"Model_{i}" for i in sorted(y.unique())]
 report = classification_report(y_test, y_pred, target_names=target_names, zero_division=0)
@@ -161,19 +195,41 @@ conf_matrix = confusion_matrix(y_test, y_pred)
 print(f"Accuracy: {accuracy:.4f}")
 print("\nClassification Report:")
 print(report)
-print("\nConfusion Matrix:")
+# print("\nConfusion Matrix:")
 # Use integer labels directly if target_names cause issues with heatmap
-print(conf_matrix)
+# print(conf_matrix)
 
-# Plot Confusion Matrix
-plt.figure(figsize=(8, 6))
-sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues',
-            xticklabels=target_names, yticklabels=target_names)
-plt.xlabel('Predicted Label')
-plt.ylabel('True Label')
-plt.title(f'Confusion Matrix ({CLASSIFIER_TYPE} - {"TFIDF" if USE_TFIDF else "BoW"})')
-plt.tight_layout() # Adjust layout
-plt.show()
+# # Plot Confusion Matrix
+# plt.figure(figsize=(8, 6))
+# sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues',
+#             xticklabels=target_names, yticklabels=target_names)
+# plt.xlabel('Predicted Label')
+# plt.ylabel('True Label')
+# plt.title(f'Confusion Matrix ({CLASSIFIER_TYPE} - {"TFIDF" if USE_TFIDF else "BoW"})')
+# plt.tight_layout() # Adjust layout
+# plt.show()
+
+# --- 5.1 Compute test accuracy for each question type ---
+# Test data: X_test, y_test, question_type_test
+
+# compute accuracy for each question type
+for question_type in QUESTION_TYPE_NOUNS:
+    select_x = X_test[question_type_test == question_type]
+    select_y = y_test[question_type_test == question_type]
+    select_y_pred = y_pred[question_type_test == question_type]
+    accuracy = accuracy_score(select_y, select_y_pred)
+    print(f"Accuracy for {question_type}: {accuracy:.4f}")
+
+    # Get class labels for report (assuming labels are 0, 1, 2...)
+    target_names = [f"Model_{i}" for i in sorted(select_y.unique())]
+    report = classification_report(select_y, select_y_pred, target_names=target_names, zero_division=0)
+    conf_matrix = confusion_matrix(select_y, select_y_pred)
+
+    print(f"Accuracy: {accuracy:.4f}")
+    print("\nClassification Report:")
+    print(report)
+
+
 
 # --- 6. Save Model and Vectorizer ---
 print(f"\nSaving model to {MODEL_SAVE_PATH}")
