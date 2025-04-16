@@ -9,6 +9,7 @@ import seaborn as sns
 import joblib # For saving the model and vectorizer
 import os # Import os for directory creation
 import numpy as np
+import json
 import pandas as pd
 
 # --- Configuration ---
@@ -16,14 +17,32 @@ import pandas as pd
 DATA_DIR = "/data2/xianglin/data/preference_leakage/output" # Base directory for data
 MODEL_DIR = "/data2/xianglin/data/preference_leakage"
 DATA_FILES = [
-    f"{DATA_DIR}/gemini_data.npy",
-    f"{DATA_DIR}/gpt4o_data.npy",
-    f"{DATA_DIR}/llama_data.npy"
+    f"{DATA_DIR}/gemini.json",
+    f"{DATA_DIR}/gpt4.json",
+    f"{DATA_DIR}/llama.json"
 ]
+
+QUESTION_TYPE_DATA_FILE = '/home/xianglin/git_space/llm-as-a-judge-analysis/analysis/dataset_categorization/ultrafeedback_categorization.json'
+QUESTION_TYPE_NOUNS = [
+    "Computer Science & Programming",
+    "Mathematics & Statistics",
+    "Science & Engineering",
+    "Business & Finance",
+    "Writing & Communication",
+    "Social & Daily Life",
+    "Others"
+]
+
+EXPECTED_JSON_OUTPUT_KEY = 'feature_vec'
+FEATURE_VEC_COLUMN = 'feature_vec'
+QUESTION_COLUMN = 'question'
+TEXT_COLUMN = 'text'
+LABEL_COLUMN = 'label'
+VECTOR_SIZE = 67
 
 # --- Classifier Configuration ---
 TEST_SIZE = 0.2                 # Proportion of data for testing
-CLASSIFIER_TYPE = 'LogisticRegression' # Options: 'NaiveBayes', 'LogisticRegression', 'SVM'
+CLASSIFIER_TYPE = 'SVM' # Options: 'NaiveBayes', 'LogisticRegression', 'SVM'
 SEED = 42                       # For reproducible train/test split
 MODEL_SAVE_PATH = f"{MODEL_DIR}/extracted_feature_bow_classifier_{CLASSIFIER_TYPE}.joblib"
 
@@ -31,34 +50,76 @@ MODEL_SAVE_PATH = f"{MODEL_DIR}/extracted_feature_bow_classifier_{CLASSIFIER_TYP
 # Extract directory from save paths if needed
 os.makedirs(os.path.dirname(MODEL_SAVE_PATH), exist_ok=True)
 
+
 # --- 1. Load Data ---
-print("Loading feature data...")    # load data into a dataframe
-# selected_feature_idxs = np.random.choice(range(67), size=60, replace=False)
+print("Loading data...")
+data_list = [] # Use a list of dictionaries to build DataFrame
 
-df = pd.DataFrame()
+with open(QUESTION_TYPE_DATA_FILE, "r", encoding="utf-8") as f:
+    question_type_data = json.load(f)
+# process question type data
+question_type_mapping = {}
+for item in question_type_data:
+    if 'question' in item.keys() and 'categorization' in item.keys() and 'question category' in item['categorization'].keys():
+        question_type_mapping[item['question']] = item['categorization']['question category']
+
+
 for i, data_file in enumerate(DATA_FILES):
-    print(f"Loading file: {data_file} with label {i}")
-    # feature_vecs = np.load(data_file)[:, selected_feature_idxs]
-    feature_vecs = np.load(data_file)
-    feature_vecs = feature_vecs.tolist()
-    labels = [i]*len(feature_vecs)
-    # current df
-    current_df = pd.DataFrame(feature_vecs, columns=[f"feature_{j}" for j in range(len(feature_vecs[0]))])
-    current_df['label'] = labels
-    df = pd.concat([df, current_df], ignore_index=True)
-    print(f"Loaded {len(df)} items from {len(DATA_FILES)} files")
+    label = i # Assign label based on file index (0, 1, 2...)
+    print(f"Loading file: {data_file} with label {label}")
+    try:
+        with open(data_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        # merge
+        count = 0
+        for i in range(len(data)):
+            instruction = data[i]['instruction']
+            qt = question_type_mapping.get(instruction, None)
+            data[i]['question_type'] = qt
+            if qt is not None:
+                count += 1
+        print(f"Total {count} question types found for {data_file}")
 
-print(f"Total loaded {len(df)} items")
-# # Optional: Shuffle the DataFrame rows (good practice before splitting)
-# df = df.sample(frac=1, random_state=SEED).reset_index(drop=True)
+        count = 0
+        for item in data:
+            if isinstance(item, dict) and EXPECTED_JSON_OUTPUT_KEY in item and item[EXPECTED_JSON_OUTPUT_KEY]:
+                feature_vec = item[EXPECTED_JSON_OUTPUT_KEY]
+                text = item['question']
+                question_type = item['question_type']
+                if isinstance(feature_vec, list) and len(feature_vec) == VECTOR_SIZE and question_type is not None and text is not None:
+                    data_list.append({FEATURE_VEC_COLUMN: feature_vec, TEXT_COLUMN: text, QUESTION_COLUMN: question_type, LABEL_COLUMN: label})
+                    count += 1
+        print(f"  Loaded {count} valid items.")
+    except FileNotFoundError:
+        print(f"  Error: File not found - {data_file}")
+    except json.JSONDecodeError:
+        print(f"  Error: Could not decode JSON from - {data_file}")
+    except Exception as e:
+        print(f"  An unexpected error occurred loading {data_file}: {e}")
+
+# Convert the list of dictionaries into a Pandas DataFrame
+if not data_list:
+    raise ValueError("No valid data loaded. Please check DATA_FILES paths and JSON structure.")
+
+df = pd.DataFrame(data_list)
+print(f"\nTotal valid items loaded into DataFrame: {len(df)}")
+print("DataFrame Info:")
+df.info()
+print("\nLabel distribution:")
+print(df[LABEL_COLUMN].value_counts())
+
+# Optional: Shuffle the DataFrame rows (good practice before splitting)
+df = df.sample(frac=1, random_state=SEED).reset_index(drop=True)
 
 # --- 2. Split Data ---
 # 67 features
-X = df[df.columns[:-1]]
-y = df[df.columns[-1]]
+X = df[FEATURE_VEC_COLUMN]
+y = df[LABEL_COLUMN]
+question_type = df[QUESTION_COLUMN]
 
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y,
+X_train, X_test, y_train, y_test, question_type_train, question_type_test = train_test_split(
+    X, y, question_type,
     test_size=TEST_SIZE,
     random_state=SEED, # for reproducibility
     stratify=y      # ensure similar label distribution in train/test
@@ -110,15 +171,36 @@ print("\nConfusion Matrix:")
 # Use integer labels directly if target_names cause issues with heatmap
 print(conf_matrix)
 
-# Plot Confusion Matrix
-plt.figure(figsize=(8, 6))
-sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues',
-            xticklabels=target_names, yticklabels=target_names)
-plt.xlabel('Predicted Label')
-plt.ylabel('True Label')
-plt.title(f'Confusion Matrix ({CLASSIFIER_TYPE})')
-plt.tight_layout() # Adjust layout
-plt.show()
+# # Plot Confusion Matrix
+# plt.figure(figsize=(8, 6))
+# sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues',
+#             xticklabels=target_names, yticklabels=target_names)
+# plt.xlabel('Predicted Label')
+# plt.ylabel('True Label')
+# plt.title(f'Confusion Matrix ({CLASSIFIER_TYPE})')
+# plt.tight_layout() # Adjust layout
+# plt.show()
+
+
+# --- 5.1 Compute test accuracy for each question type ---
+# Test data: X_test, y_test, question_type_test
+
+# compute accuracy for each question type
+for question_type in QUESTION_TYPE_NOUNS:
+    select_x = X_test[question_type_test == question_type]
+    select_y = y_test[question_type_test == question_type]
+    select_y_pred = y_pred[question_type_test == question_type]
+    accuracy = accuracy_score(select_y, select_y_pred)
+    print(f"Accuracy for {question_type}: {accuracy:.4f}")
+
+    # Get class labels for report (assuming labels are 0, 1, 2...)
+    target_names = [f"Model_{i}" for i in sorted(select_y.unique())]
+    report = classification_report(select_y, select_y_pred, target_names=target_names, zero_division=0)
+    conf_matrix = confusion_matrix(select_y, select_y_pred)
+
+    print(f"Accuracy: {accuracy:.4f}")
+    print("\nClassification Report:")
+    print(report)
 
 # --- 6. Save Model and Vectorizer ---
 print(f"\nSaving model to {MODEL_SAVE_PATH}")
