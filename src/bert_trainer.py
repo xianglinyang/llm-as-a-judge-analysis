@@ -80,10 +80,10 @@ for i, data_file in enumerate(DATA_FILES):
         
         # merge
         count = 0
-        for i in range(len(data)):
-            instruction = data[i]['instruction']
+        for j in range(len(data)):
+            instruction = data[j]['instruction']
             qt = question_type_mapping.get(instruction, None)
-            data[i]['question_type'] = qt
+            data[j]['question_type'] = qt
             if qt is not None:
                 count += 1
         print(f"Total {count} question types found for {data_file}")

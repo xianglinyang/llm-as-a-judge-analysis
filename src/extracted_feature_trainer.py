@@ -72,10 +72,10 @@ for i, data_file in enumerate(DATA_FILES):
         
         # merge
         count = 0
-        for i in range(len(data)):
-            instruction = data[i]['instruction']
+        for j in range(len(data)):  # Changed i to j to avoid overwriting label
+            instruction = data[j]['instruction']
             qt = question_type_mapping.get(instruction, None)
-            data[i]['question_type'] = qt
+            data[j]['question_type'] = qt
             if qt is not None:
                 count += 1
         print(f"Total {count} question types found for {data_file}")
@@ -94,7 +94,7 @@ for i, data_file in enumerate(DATA_FILES):
                     count += 1
         current_df = pd.DataFrame(data_list, columns=[f"feature_{j}" for j in range(len(data_list[0]))])
         current_df[QUESTION_COLUMN] = question_type_list
-        current_df[LABEL_COLUMN] = [i]*len(question_type_list)
+        current_df[LABEL_COLUMN] = [label]*len(data_list)
         df = pd.concat([df, current_df], ignore_index=True)
         print(f"Loaded {len(df)} items from {len(DATA_FILES)} files")
 
@@ -105,12 +105,18 @@ for i, data_file in enumerate(DATA_FILES):
     except Exception as e:
         print(f"  An unexpected error occurred loading {data_file}: {e}")
 
+# Optional: Shuffle the DataFrame rows (good practice before splitting)
+df = df.sample(frac=1, random_state=SEED).reset_index(drop=True)
 
 # --- 2. Split Data ---
 # 67 features
-X = df[df.columns[:VECTOR_SIZE]].astype(float)
+feature_columns = [f"feature_{j}" for j in range(VECTOR_SIZE)]
+X = df[feature_columns].astype(float)
 y = df[LABEL_COLUMN].astype(int)
 question_type = df[QUESTION_COLUMN].astype(str)
+
+print(f"Label distribution: {y.value_counts()}")
+print(f"Collect {len(y.unique())} labels: {sorted(y.unique())}")
 
 X_train, X_test, y_train, y_test, question_type_train, question_type_test = train_test_split(
     X, y, question_type,

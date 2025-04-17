@@ -14,6 +14,7 @@ import os # Import os for directory creation
 # --- Configuration ---
 # --- Data Loading Configuration ---
 DATA_DIR = "/data2/xianglin/data/preference_leakage" # Base directory for data
+MODEL_DIR = "/data2/xianglin/data/preference_leakage/bag_of_word_classifier"
 DATA_FILES = [
     f"{DATA_DIR}/UltraFeedback_sampled_30000_gemini_LlamaFactory.json",
     f"{DATA_DIR}/UltraFeedback_sampled_30000_gpt4_LlamaFactory.json",
@@ -43,8 +44,9 @@ STOP_WORDS = 'english'          # Use built-in English stop words ('None' to dis
 NGRAM_RANGE = (1, 2)            # Use unigrams and bigrams (often better than just unigrams)
 CLASSIFIER_TYPE = 'SVM' # Options: 'NaiveBayes', 'LogisticRegression', 'SVM'
 SEED = 42                       # For reproducible train/test split
-MODEL_SAVE_PATH = f"{DATA_DIR}/bow_classifier_{CLASSIFIER_TYPE}.joblib"
-VECTORIZER_SAVE_PATH = f"{DATA_DIR}/bow_vectorizer_{'tfidf' if USE_TFIDF else 'count'}_ngram{NGRAM_RANGE[1]}_maxf{MAX_FEATURES}.joblib"
+
+MODEL_SAVE_PATH = f"{MODEL_DIR}/{CLASSIFIER_TYPE}.joblib"
+VECTORIZER_SAVE_PATH = f"{MODEL_DIR}/{'tfidf' if USE_TFIDF else 'count'}_ngram{NGRAM_RANGE[1]}_maxf{MAX_FEATURES}.joblib"
 
 # --- Ensure output directory exists ---
 # Extract directory from save paths if needed
@@ -75,10 +77,10 @@ for i, data_file in enumerate(DATA_FILES):
         
         # merge
         count = 0
-        for i in range(len(data)):
-            instruction = data[i]['instruction']
+        for j in range(len(data)):
+            instruction = data[j]['instruction']
             qt = question_type_mapping.get(instruction, None)
-            data[i]['question_type'] = qt
+            data[j]['question_type'] = qt
             if qt is not None:
                 count += 1
         print(f"Total {count} question types found for {data_file}")
